@@ -1,0 +1,37 @@
+!pip install music21 pandas openpyxl
+
+import pandas as pd
+from music21 import converter, note, chord
+from google.colab import files
+#Put files here
+musicxml_files = ["/content/mcm 1 page.xml"]
+
+excel_path = "/content/music_notes.xlsx"
+with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
+
+    for file_path in musicxml_files:
+        score = converter.parse(file_path)
+
+        def extract_notes(score):
+            note_counts = {}
+            for part in score.parts:
+                for element in part.flat.notes:
+                    if isinstance(element, note.Note):
+                        note_name = element.nameWithOctave
+                        note_counts[note_name] = note_counts.get(note_name, 0) + 1
+                    elif isinstance(element, chord.Chord):
+                        for pitch in element.pitches:
+                            note_name = pitch.nameWithOctave
+                            note_counts[note_name] = note_counts.get(note_name, 0) + 1
+            return note_counts
+
+        note_counts = extract_notes(score)
+
+        df = pd.DataFrame(list(note_counts.items()), columns=["Note", "Count"])
+
+        sheet_name = file_path.split("/")[-1].replace(".xml", "")
+        df.to_excel(writer, sheet_name=sheet_name, index=False)
+
+files.download(excel_path)
+
+print(f"Saved and ready for download: {excel_path}")
