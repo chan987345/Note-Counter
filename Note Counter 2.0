@@ -1,0 +1,152 @@
+import pandas as pd
+from music21 import converter, note, chord, pitch, articulations, key
+from google.colab import files
+from openpyxl import load_workbook
+from openpyxl.formatting.rule import ColorScaleRule
+import os
+
+def get_note_label(p: pitch.Pitch, active_key_signature=None):
+    if p.accidental is not None:
+        if p.accidental.alter == 1.0:
+            return f"{p.step}#{p.octave}"
+        elif p.accidental.alter == -1.0:
+            return f"{p.step}b{p.octave}"
+        elif p.accidental.alter == 0.0:
+            return f"{p.step}{p.octave}"
+        else:
+            return f"{p.name}{p.octave}"
+    if active_key_signature is not None:
+        step = p.step
+        for altered_pitch in active_key_signature.alteredPitches:
+            if altered_pitch.step == step:
+                if altered_pitch.accidental.alter == 1.0:
+                    return f"{step}#{p.octave}"
+                elif altered_pitch.accidental.alter == -1.0:
+                    return f"{step}b{p.octave}"
+    return f"{p.step}{p.octave}"
+
+musicxml_files = ["/content/AQ 25 marimba 4.xml"]
+
+for file_path in musicxml_files:
+    score = converter.parse(file_path)
+    measures_data = []
+    overall_counts = {}
+    key_signatures = {}
+    active_key_signature = None
+
+    for part in score.parts:
+        for element in part.flat:
+            if isinstance(element, key.KeySignature):
+                key_signatures[element.measureNumber] = element
+
+    note_data = []
+    attack_map = {}
+    accent_map = {}
+    current_beats = None
+
+    for part in score.parts:
+        for element in part.flat:
+            if isinstance(element, key.KeySignature):
+                active_key_signature = element
+            if isinstance(element, note.Note):
+                label = get_note_label(element.pitch, active_key_signature)
+                note_data.append((element.measureNumber, element.offset, label))
+                if any(isinstance(art, articulations.Accent) for art in element.articulations):
+                    accent_map.setdefault(element.measureNumber, set()).add(element.offset)
+            elif isinstance(element, chord.Chord):
+                for p in element.pitches:
+                    label = get_note_label(p, active_key_signature)
+                    note_data.append((element.measureNumber, element.offset, label))
+                if any(isinstance(art, articulations.Accent) for art in element.articulations):
+                    accent_map.setdefault(element.measureNumber, set()).add(element.offset)
+
+    measures = {}
+    for measure_num, offset, pitch_label in note_data:
+        if measure_num not in measures:
+            measures[measure_num] = {}
+            attack_map[measure_num] = set()
+        measures[measure_num][pitch_label] = measures[measure_num].get(pitch_label, 0) + 1
+        attack_map[measure_num].add(offset)
+        overall_counts[pitch_label] = overall_counts.get(pitch_label, 0) + 1
+
+    time_signatures = {}
+    if score.parts:
+        for m in score.parts[0].getElementsByClass('Measure'):
+            if m.timeSignature is not None:
+                time_signatures[m.number] = m.timeSignature.numerator
+
+    max_measure = max(measures.keys()) if measures else 0
+    for i in range(1, max_measure + 1):
+        pitch_counter = measures.get(i, {})
+        total_notes = sum(pitch_counter.values())
+        total_attacks = len(attack_map.get(i, set()))
+        total_accents = len(accent_map.get(i, set()))
+        pitch_str = ", ".join(f"{k}: {v}" for k, v in sorted(pitch_counter.items())) if pitch_counter else ""
+        beats = time_signatures.get(i, current_beats)
+        if beats is not None:
+            current_beats = beats
+        else:
+            beats = current_beats if current_beats is not None else 4
+
+        measures_data.append({
+            "letter": "",
+            "measure": i,
+            "beats": beats,
+            "tempo": "",
+            "time": "",
+            "pitches": total_notes,
+            "attacks": total_attacks,
+            "accents": total_accents,
+            "pitches/sec": "",
+            "attacks/sec": "",
+            "accents/sec": "",
+            "pitches_copy": pitch_str
+        })
+
+    df_totals = pd.DataFrame(
+        sorted(overall_counts.items(), key=lambda x: x[1], reverse=True),
+        columns=["Note", "Total Count"]
+    )
+    df_measures = pd.DataFrame(measures_data)
+
+    df_master = pd.DataFrame({
+        "letter": [""] * 500,
+        "measure": list(range(1, 501)),
+        "beats": [f'=IFERROR(INDEX(Sheet1!C:C, MATCH(B{i+2}, Sheet1!B:B, 0)), 0)' for i in range(500)],
+        "tempo": [f'=IFERROR(INDEX(Sheet1!D:D, MATCH(B{i+2}, Sheet1!B:B, 0)), "")' for i in range(500)],
+        "time": [f'=ROUND(60*C{i+2}/D{i+2}, 2)' for i in range(500)],
+        "pitches": [f'=IFERROR(INDEX(Sheet1!F:F, MATCH(B{i+2}, Sheet1!B:B, 0)), 0)' for i in range(500)],
+        "attacks": [f'=IFERROR(INDEX(Sheet1!G:G, MATCH(B{i+2}, Sheet1!B:B, 0)), 0)' for i in range(500)],
+        "accents": [f'=IFERROR(INDEX(Sheet1!H:H, MATCH(B{i+2}, Sheet1!B:B, 0)), 0)' for i in range(500)],
+        "pitches/sec": [f'=ROUND(F{i+2}/E{i+2}, 2)' for i in range(500)],
+        "attacks/sec": [f'=ROUND(G{i+2}/E{i+2}, 2)' for i in range(500)],
+        "accents/sec": [f'=ROUND(H{i+2}/E{i+2}, 2)' for i in range(500)],
+        "pitches_copy": [f'=IFERROR(INDEX(Sheet1!L:L, MATCH(B{i+2}, Sheet1!B:B, 0)), "")' for i in range(500)]
+    })
+
+    base_filename = os.path.splitext(os.path.basename(file_path))[0]
+    excel_path = f"/content/{base_filename}.xlsx"
+
+    with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
+        df_measures.to_excel(writer, index=False, startrow=0, startcol=0, sheet_name='Sheet1')
+        df_totals.to_excel(writer, index=False, startrow=0, startcol=13, sheet_name='Sheet1')
+        df_master.to_excel(writer, index=False, sheet_name='Master')
+
+    wb = load_workbook(excel_path)
+    ws = wb["Sheet1"]
+
+    start_row = 2
+    end_row = start_row + len(df_totals) - 1
+    col_letter = ws.cell(row=1, column=14).column_letter
+
+    green_rule = ColorScaleRule(
+        start_type='min', start_color='C6EFCE',
+        mid_type='percentile', mid_value=50, mid_color='A9D08E',
+        end_type='max', end_color='006100'
+    )
+    ws.conditional_formatting.add(f"{col_letter}{start_row}:{col_letter}{end_row}", green_rule)
+
+    wb.save(excel_path)
+    files.download(excel_path)
+
+print("hooray")
